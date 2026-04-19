@@ -1,5 +1,5 @@
 """
-🌊 Analyse de l'Érosion Côtière — Nouakchott, Mauritanie
+🌊 Analyse de l'Érosion Côtière — Mauritanie
 Sentinel-2 (NDWI) | Google Earth Engine | Streamlit
 """
 
@@ -7,15 +7,17 @@ import streamlit as st
 import ee
 import folium
 from folium import plugins
+from folium.plugins import Draw
 from streamlit_folium import st_folium
 import plotly.graph_objects as go
 import pandas as pd
+import json
 
 # ═══════════════════════════════════════════════════════
 #  PAGE CONFIG
 # ═══════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="🌊 Érosion Côtière - Nouakchott",
+    page_title="🌊 Érosion Côtière - Mauritanie",
     page_icon="🌊",
     layout="wide",
 )
@@ -42,6 +44,13 @@ st.markdown("""
     }
     .stat-box h2 { margin: 6px 0 2px 0; font-size: 1.6rem; }
     .stat-box p  { margin: 0; color: #64748b; font-size: 0.85rem; }
+    .step-box {
+        background: #f0f9ff;
+        border: 1px solid #bae6fd;
+        border-radius: 10px;
+        padding: 16px;
+        margin: 8px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -52,14 +61,11 @@ GEE_PROJECT = "concise-metrics-471614-f2"
 
 @st.cache_resource
 def init_ee():
-    # 1) Essayer avec les credentials locales (earthengine authenticate)
     try:
         ee.Initialize(project=GEE_PROJECT)
         return True
     except Exception:
         pass
-
-    # 2) Essayer avec un Service Account (Streamlit Cloud)
     try:
         sa = st.secrets["GEE_SERVICE_ACCOUNT"]
         ck = st.secrets["GEE_CREDENTIALS"]
@@ -71,8 +77,6 @@ def init_ee():
     except Exception as e:
         st.error(f"❌ Erreur GEE (Service Account) : {e}")
         st.stop()
-
-    # 3) Dernier recours : authentification interactive
     try:
         ee.Authenticate()
         ee.Initialize(project=GEE_PROJECT)
@@ -85,54 +89,9 @@ def init_ee():
 init_ee()
 
 # ═══════════════════════════════════════════════════════
-#  ZONES PRÉDÉFINIES
-# ═══════════════════════════════════════════════════════
-ZONES = {
-    "Nouakchott — Côte complète": {
-        "bounds": [-16.04, 18.00, -15.88, 18.20],
-        "center": [18.10, -15.96],
-        "zoom": 12,
-    },
-    "Nouakchott — Plage Sud": {
-        "bounds": [-16.03, 18.00, -15.95, 18.06],
-        "center": [18.03, -15.99],
-        "zoom": 14,
-    },
-    "Nouakchott — Centre-ville": {
-        "bounds": [-16.03, 18.06, -15.92, 18.12],
-        "center": [18.09, -15.97],
-        "zoom": 14,
-    },
-    "Nouakchott — Nord (Toujounine)": {
-        "bounds": [-16.03, 18.12, -15.90, 18.20],
-        "center": [18.16, -15.96],
-        "zoom": 14,
-    },
-    "Zone personnalisée": {
-        "bounds": None,
-        "center": [18.10, -15.96],
-        "zoom": 12,
-    },
-}
-
-TRANSECTS_ALL = [
-    {"lon": -16.00, "lat": 18.01, "nom": "T01 Plage Sud"},
-    {"lon": -16.00, "lat": 18.03, "nom": "T02 Plage Centre S"},
-    {"lon": -16.00, "lat": 18.05, "nom": "T03 Port de Pêche"},
-    {"lon": -16.00, "lat": 18.07, "nom": "T04 Centre-Ville"},
-    {"lon": -16.00, "lat": 18.09, "nom": "T05 Tevragh Zeina"},
-    {"lon": -16.00, "lat": 18.11, "nom": "T06 Ksar Nord"},
-    {"lon": -16.00, "lat": 18.13, "nom": "T07 Sebkha"},
-    {"lon": -16.00, "lat": 18.15, "nom": "T08 Toujounine S"},
-    {"lon": -16.00, "lat": 18.17, "nom": "T09 Toujounine N"},
-    {"lon": -16.00, "lat": 18.19, "nom": "T10 Nord Limite"},
-]
-
-# ═══════════════════════════════════════════════════════
-#  GEE PROCESSING
+#  GEE FUNCTIONS
 # ═══════════════════════════════════════════════════════
 def get_ndwi_and_water(start, end, aoi):
-    """Charger Sentinel-2, calculer NDWI, retourner masque eau."""
     col = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
         .filterBounds(aoi)
@@ -152,22 +111,16 @@ def get_ndwi_and_water(start, end, aoi):
 
 
 def get_tile_url(image, vis):
-    """Obtenir l'URL des tuiles pour affichage dans Folium."""
     map_id = image.getMapId(vis)
     return map_id["tile_fetcher"].url_format
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def run_analysis(bounds, date1_start, date1_end, date2_start, date2_end):
-    """Analyse complète : érosion, accrétion, transects."""
-
     aoi = ee.Geometry.Rectangle(bounds)
 
-    # ── Charger les deux périodes ──
     ndwi1, water1, count1 = get_ndwi_and_water(date1_start, date1_end, aoi)
     ndwi2, water2, count2 = get_ndwi_and_water(date2_start, date2_end, aoi)
 
-    # ── Changements ──
     erosion = water2.And(water1.Not()).selfMask().rename("eau")
     accretion = water1.And(water2.Not()).selfMask().rename("eau")
 
@@ -175,134 +128,80 @@ def run_analysis(bounds, date1_start, date1_end, date2_start, date2_end):
 
     tot_e = (
         erosion.multiply(pixel_area)
-        .reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi,
-            scale=20,
-            maxPixels=1e10,
-            bestEffort=True,
-        )
-        .getNumber("eau")
-        .getInfo()
-        or 0
+        .reduceRegion(reducer=ee.Reducer.sum(), geometry=aoi, scale=20, maxPixels=1e10, bestEffort=True)
+        .getNumber("eau").getInfo() or 0
     )
     tot_a = (
         accretion.multiply(pixel_area)
-        .reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=aoi,
-            scale=20,
-            maxPixels=1e10,
-            bestEffort=True,
-        )
-        .getNumber("eau")
-        .getInfo()
-        or 0
+        .reduceRegion(reducer=ee.Reducer.sum(), geometry=aoi, scale=20, maxPixels=1e10, bestEffort=True)
+        .getNumber("eau").getInfo() or 0
     )
 
-    # ── Tuiles pour la carte ──
-    ndwi_vis = {
-        "min": -0.5,
-        "max": 0.5,
-        "palette": ["8B4513", "F5DEB3", "FFFFFF", "87CEEB", "0000CD"],
-    }
+    ndwi_vis = {"min": -0.5, "max": 0.5, "palette": ["8B4513", "F5DEB3", "FFFFFF", "87CEEB", "0000CD"]}
     tile1 = get_tile_url(ndwi1, ndwi_vis)
     tile2 = get_tile_url(ndwi2, ndwi_vis)
     tile_ero = get_tile_url(erosion, {"palette": ["FF0000"]})
     tile_acc = get_tile_url(accretion, {"palette": ["00CC00"]})
 
-    # ── Transects dans la zone ──
-    lat_min, lat_max = bounds[1], bounds[3]
-    active_transects = [
-        t for t in TRANSECTS_ALL if lat_min <= t["lat"] <= lat_max
-    ]
+    # Transects automatiques le long de la côte sélectionnée
+    lon_min, lat_min, lon_max, lat_max = bounds
+    coast_lon = lon_min + (lon_max - lon_min) * 0.3  # approximation de la ligne de côte
+    lat_range = lat_max - lat_min
+    n_transects = min(10, max(3, int(lat_range / 0.02)))
 
     transect_rows = []
-    for t in active_transects:
-        zone = ee.Geometry.Point([t["lon"], t["lat"]]).buffer(800).bounds()
+    for i in range(n_transects):
+        lat = lat_min + (i + 0.5) * lat_range / n_transects
+        zone = ee.Geometry.Point([coast_lon, lat]).buffer(800).bounds()
 
         se = (
             erosion.multiply(pixel_area)
-            .reduceRegion(
-                reducer=ee.Reducer.sum(),
-                geometry=zone,
-                scale=20,
-                maxPixels=1e8,
-                bestEffort=True,
-            )
-            .getNumber("eau")
-            .getInfo()
-            or 0
+            .reduceRegion(reducer=ee.Reducer.sum(), geometry=zone, scale=20, maxPixels=1e8, bestEffort=True)
+            .getNumber("eau").getInfo() or 0
         )
         sa = (
             accretion.multiply(pixel_area)
-            .reduceRegion(
-                reducer=ee.Reducer.sum(),
-                geometry=zone,
-                scale=20,
-                maxPixels=1e8,
-                bestEffort=True,
-            )
-            .getNumber("eau")
-            .getInfo()
-            or 0
+            .reduceRegion(reducer=ee.Reducer.sum(), geometry=zone, scale=20, maxPixels=1e8, bestEffort=True)
+            .getNumber("eau").getInfo() or 0
         )
         recul = round(se / 1600)
         avancee = round(sa / 1600)
-        transect_rows.append(
-            {
-                "Transect": t["nom"],
-                "Lat": t["lat"],
-                "Recul (m)": recul,
-                "Avancée (m)": avancee,
-                "Bilan (m)": avancee - recul,
-            }
-        )
+        transect_rows.append({
+            "Transect": f"T{i+1:02d}",
+            "Lat": round(lat, 4),
+            "Lon": round(coast_lon, 4),
+            "Recul (m)": recul,
+            "Avancée (m)": avancee,
+            "Bilan (m)": avancee - recul,
+        })
 
     return {
-        "count1": count1,
-        "count2": count2,
-        "erosion_m2": round(tot_e),
-        "accretion_m2": round(tot_a),
-        "tile1": tile1,
-        "tile2": tile2,
-        "tile_ero": tile_ero,
-        "tile_acc": tile_acc,
+        "count1": count1, "count2": count2,
+        "erosion_m2": round(tot_e), "accretion_m2": round(tot_a),
+        "tile1": tile1, "tile2": tile2,
+        "tile_ero": tile_ero, "tile_acc": tile_acc,
         "transects": transect_rows,
+        "bounds": bounds,
     }
 
 
 # ═══════════════════════════════════════════════════════
-#  SIDEBAR
+#  HEADER
+# ═══════════════════════════════════════════════════════
+st.markdown("""
+<div class='hero'>
+    <h1>🌊 Analyse de l'Érosion Côtière</h1>
+    <p>Côte Atlantique — Mauritanie | Sentinel-2 NDWI | Google Earth Engine</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════
+#  SIDEBAR — PARAMÈTRES
 # ═══════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("## ⚙️ Paramètres")
 
-    # ── Zone ──
-    st.markdown("### 📍 Zone d'étude")
-    zone_name = st.selectbox("Choisir une zone", list(ZONES.keys()))
-    zone = ZONES[zone_name]
-
-    if zone_name == "Zone personnalisée":
-        st.markdown("Entrez les coordonnées :")
-        c1, c2 = st.columns(2)
-        lon_min = c1.number_input("Lon min", value=-16.04, format="%.4f")
-        lat_min = c2.number_input("Lat min", value=18.00, format="%.4f")
-        lon_max = c1.number_input("Lon max", value=-15.88, format="%.4f")
-        lat_max = c2.number_input("Lat max", value=18.20, format="%.4f")
-        bounds = [lon_min, lat_min, lon_max, lat_max]
-        center = [(lat_min + lat_max) / 2, (lon_min + lon_max) / 2]
-        zoom = 12
-    else:
-        bounds = zone["bounds"]
-        center = zone["center"]
-        zoom = zone["zoom"]
-
-    st.markdown("---")
-
-    # ── Années ──
     st.markdown("### 📅 Périodes")
-
     YEARS = list(range(2015, 2027))
 
     st.markdown("**Période de référence**")
@@ -319,7 +218,6 @@ with st.sidebar:
     date1_end = f"{y1_end}-12-31"
     date2_start = f"{y2_start}-01-01"
     date2_end = f"{y2_end}-12-31"
-
     ecart = y2_start - y1_start
 
     st.markdown("---")
@@ -329,43 +227,134 @@ with st.sidebar:
     st.caption("Seuil eau : NDWI > 0.1")
     st.caption("Nuages < 15 %")
 
-    st.markdown("---")
-    run_btn = st.button("🚀 Lancer l'analyse", type="primary", use_container_width=True)
+# ═══════════════════════════════════════════════════════
+#  ÉTAPE 1 — SÉLECTION DE LA ZONE
+# ═══════════════════════════════════════════════════════
+st.markdown("### 📍 Étape 1 : Sélectionnez votre zone d'étude")
 
-# ═══════════════════════════════════════════════════════
-#  HEADER
-# ═══════════════════════════════════════════════════════
-st.markdown(
-    f"""
-<div class='hero'>
-    <h1>🌊 Analyse de l'Érosion Côtière</h1>
-    <p>{zone_name} — Sentinel-2 NDWI — {y1_start}-{y1_end} vs {y2_start}-{y2_end} ({ecart} ans)</p>
+st.markdown("""
+<div class='step-box'>
+    <b>🖊️ Instructions :</b> Utilisez l'outil rectangle <b>▭</b> (à gauche de la carte) 
+    pour dessiner un rectangle sur la zone côtière que vous souhaitez analyser.<br>
+    <b>⚠️ Important :</b> La zone doit contenir du littoral (mer + terre).
 </div>
-""",
-    unsafe_allow_html=True,
+""", unsafe_allow_html=True)
+
+# Carte centrée sur toute la côte mauritanienne
+# Côte mauritanienne : du Cap Blanc (20.85°N) au fleuve Sénégal (16.05°N)
+m_select = folium.Map(
+    location=[18.5, -16.2],
+    zoom_start=7,
+    tiles="Esri.WorldImagery",
 )
 
+# Ajouter les noms des villes côtières
+villes = [
+    {"nom": "Nouadhibou", "lat": 20.93, "lon": -17.03},
+    {"nom": "Cap Blanc", "lat": 20.85, "lon": -17.05},
+    {"nom": "Nouakchott", "lat": 18.09, "lon": -15.98},
+    {"nom": "Parc Banc d'Arguin", "lat": 19.70, "lon": -16.45},
+    {"nom": "Rosso", "lat": 16.51, "lon": -15.81},
+    {"nom": "Saint-Louis (SN)", "lat": 16.02, "lon": -16.50},
+]
+
+for v in villes:
+    folium.Marker(
+        location=[v["lat"], v["lon"]],
+        popup=v["nom"],
+        icon=folium.Icon(color="blue", icon="info-sign"),
+    ).add_to(m_select)
+
+# Trait de côte approximatif pour guider l'utilisateur
+coast_line = [
+    [-17.08, 20.90], [-17.05, 20.50], [-16.90, 20.20],
+    [-16.60, 19.80], [-16.50, 19.50], [-16.40, 19.20],
+    [-16.30, 18.80], [-16.15, 18.40], [-16.05, 18.10],
+    [-16.00, 17.80], [-16.05, 17.50], [-16.10, 17.20],
+    [-16.20, 16.80], [-16.30, 16.50], [-16.45, 16.10],
+]
+folium.PolyLine(
+    locations=[[p[1], p[0]] for p in coast_line],
+    color="#00bcd4",
+    weight=3,
+    opacity=0.6,
+    dash_array="10",
+    popup="Trait de côte approximatif",
+).add_to(m_select)
+
+# Outil de dessin (rectangle uniquement)
+Draw(
+    export=False,
+    draw_options={
+        "polyline": False,
+        "polygon": False,
+        "circle": False,
+        "circlemarker": False,
+        "marker": False,
+        "rectangle": {
+            "shapeOptions": {
+                "color": "#ff4444",
+                "weight": 3,
+                "fillOpacity": 0.1,
+            }
+        },
+    },
+    edit_options={"edit": False},
+).add_to(m_select)
+
+map_data = st_folium(m_select, height=500, use_container_width=True, returned_objects=["all_drawings"])
+
 # ═══════════════════════════════════════════════════════
-#  STATE
+#  EXTRAIRE LA ZONE DESSINÉE
 # ═══════════════════════════════════════════════════════
-if "results" not in st.session_state:
-    st.session_state.results = None
+drawn_bounds = None
 
-if run_btn:
-    with st.spinner("🔄 Analyse en cours… (1-3 minutes selon la zone)"):
-        st.session_state.results = run_analysis(
-            bounds, date1_start, date1_end, date2_start, date2_end
-        )
+if map_data and map_data.get("all_drawings"):
+    drawings = map_data["all_drawings"]
+    if len(drawings) > 0:
+        last_drawing = drawings[-1]
+        geom = last_drawing.get("geometry", {})
+        if geom.get("type") == "Polygon":
+            coords = geom["coordinates"][0]
+            lons = [c[0] for c in coords]
+            lats = [c[1] for c in coords]
+            drawn_bounds = [min(lons), min(lats), max(lons), max(lats)]
 
-results = st.session_state.results
+# Afficher la zone sélectionnée ou message
+if drawn_bounds:
+    st.success(
+        f"✅ Zone sélectionnée : "
+        f"Lon [{drawn_bounds[0]:.3f}, {drawn_bounds[2]:.3f}] — "
+        f"Lat [{drawn_bounds[1]:.3f}, {drawn_bounds[3]:.3f}]"
+    )
 
-if results is None:
-    st.info("👈 Configurez les paramètres dans la barre latérale puis cliquez sur **Lancer l'analyse**.")
+    # Bouton pour lancer l'analyse
+    if st.button("🚀 Lancer l'analyse", type="primary", use_container_width=True):
+        with st.spinner("🔄 Analyse en cours… (1-3 minutes selon la taille de la zone)"):
+            st.session_state.results = run_analysis(
+                drawn_bounds, date1_start, date1_end, date2_start, date2_end
+            )
+            st.session_state.ecart = ecart
+            st.session_state.y1 = f"{y1_start}-{y1_end}"
+            st.session_state.y2 = f"{y2_start}-{y2_end}"
+        st.rerun()
+else:
+    st.info("👆 Dessinez un rectangle sur la carte pour sélectionner votre zone d'étude, puis cliquez sur **Lancer l'analyse**.")
+
+# ═══════════════════════════════════════════════════════
+#  RÉSULTATS
+# ═══════════════════════════════════════════════════════
+if "results" not in st.session_state or st.session_state.results is None:
     st.stop()
 
-# ═══════════════════════════════════════════════════════
-#  MÉTRIQUES
-# ═══════════════════════════════════════════════════════
+results = st.session_state.results
+ecart = st.session_state.get("ecart", 10)
+y1_label = st.session_state.get("y1", "2015-2016")
+y2_label = st.session_state.get("y2", "2024-2026")
+
+st.markdown("---")
+
+# ── MÉTRIQUES ──
 st.markdown("### 📊 Résultats globaux")
 
 c1, c2, c3, c4 = st.columns(4)
@@ -376,9 +365,7 @@ with c1:
         <p>🔴 Érosion totale</p>
         <h2>{results['erosion_m2']:,} m²</h2>
         <p>{results['erosion_m2']/10000:,.2f} ha</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+        </div>""", unsafe_allow_html=True)
 
 with c2:
     st.markdown(
@@ -386,9 +373,7 @@ with c2:
         <p>🟢 Accrétion totale</p>
         <h2>{results['accretion_m2']:,} m²</h2>
         <p>{results['accretion_m2']/10000:,.2f} ha</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+        </div>""", unsafe_allow_html=True)
 
 with c3:
     net = results["accretion_m2"] - results["erosion_m2"]
@@ -399,169 +384,96 @@ with c3:
         <p>📐 {label}</p>
         <h2 style='color:{color};'>{abs(net):,} m²</h2>
         <p>{abs(net)/10000:,.2f} ha</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+        </div>""", unsafe_allow_html=True)
 
 with c4:
-    rate = round(results["erosion_m2"] / 20000 / ecart, 2) if ecart > 0 else 0
+    coast_len = (results["bounds"][3] - results["bounds"][1]) * 111000 * 0.3
+    coast_len = max(coast_len, 1000)
+    rate = round(results["erosion_m2"] / coast_len / max(ecart, 1), 2)
     st.markdown(
         f"""<div class='stat-box' style='border-top-color:#3b82f6;'>
         <p>📏 Taux de recul</p>
         <h2>{rate} m/an</h2>
         <p>{results['count1']} + {results['count2']} images S-2</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+        </div>""", unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════════
-#  CARTE
-# ═══════════════════════════════════════════════════════
-st.markdown("### 🗺️ Carte interactive")
+# ── CARTES RÉSULTATS ──
+st.markdown("### 🗺️ Carte des résultats")
 
-tab_compare, tab_erosion = st.tabs(
-    ["🔄 Comparaison NDWI", "🔴🟢 Érosion / Accrétion"]
-)
+tab_compare, tab_erosion = st.tabs(["🔄 Comparaison NDWI", "🔴🟢 Érosion / Accrétion"])
+
+bounds = results["bounds"]
+center_lat = (bounds[1] + bounds[3]) / 2
+center_lon = (bounds[0] + bounds[2]) / 2
 
 with tab_compare:
     st.caption("Glissez le curseur au centre pour comparer les deux périodes")
 
-    m1 = plugins.DualMap(location=center, zoom_start=zoom, layout="horizontal")
+    m1 = plugins.DualMap(location=[center_lat, center_lon], zoom_start=13, layout="horizontal")
 
-    folium.TileLayer(
-        tiles=results["tile1"],
-        attr="GEE Sentinel-2",
-        name=f"NDWI {y1_start}-{y1_end}",
-        overlay=True,
-    ).add_to(m1.m1)
+    folium.TileLayer(tiles=results["tile1"], attr="GEE", name=f"NDWI {y1_label}", overlay=True).add_to(m1.m1)
+    folium.TileLayer(tiles=results["tile2"], attr="GEE", name=f"NDWI {y2_label}", overlay=True).add_to(m1.m2)
 
-    folium.TileLayer(
-        tiles=results["tile2"],
-        attr="GEE Sentinel-2",
-        name=f"NDWI {y2_start}-{y2_end}",
-        overlay=True,
-    ).add_to(m1.m2)
-
-    # Ajouter zone d'étude
-    folium.Rectangle(
-        bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-        color="red",
-        weight=2,
-        fill=False,
-        popup="Zone d'étude",
-    ).add_to(m1.m1)
-
-    folium.Rectangle(
-        bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-        color="red",
-        weight=2,
-        fill=False,
-        popup="Zone d'étude",
-    ).add_to(m1.m2)
+    folium.Rectangle(bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
+                     color="red", weight=2, fill=False).add_to(m1.m1)
+    folium.Rectangle(bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
+                     color="red", weight=2, fill=False).add_to(m1.m2)
 
     st_folium(m1, height=500, use_container_width=True, returned_objects=[])
 
 with tab_erosion:
-    m2 = folium.Map(location=center, zoom_start=zoom, tiles="Esri.WorldImagery")
+    m2 = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles="Esri.WorldImagery")
 
-    folium.TileLayer(
-        tiles=results["tile_ero"],
-        attr="GEE",
-        name="🔴 Érosion",
-        overlay=True,
-    ).add_to(m2)
+    folium.TileLayer(tiles=results["tile_ero"], attr="GEE", name="🔴 Érosion", overlay=True).add_to(m2)
+    folium.TileLayer(tiles=results["tile_acc"], attr="GEE", name="🟢 Accrétion", overlay=True).add_to(m2)
 
-    folium.TileLayer(
-        tiles=results["tile_acc"],
-        attr="GEE",
-        name="🟢 Accrétion",
-        overlay=True,
-    ).add_to(m2)
-
-    # Transects sur la carte
     for t in results["transects"]:
-        color = "#ef4444" if t["Bilan (m)"] < 0 else "#22c55e"
+        clr = "#ef4444" if t["Bilan (m)"] < 0 else "#22c55e"
         folium.CircleMarker(
-            location=[t["Lat"], -16.00],
-            radius=6,
-            color=color,
-            fill=True,
-            fill_opacity=0.8,
-            popup=f"{t['Transect']}<br>Bilan: {t['Bilan (m)']} m",
+            location=[t["Lat"], t["Lon"]],
+            radius=7, color=clr, fill=True, fill_opacity=0.8,
+            popup=f"<b>{t['Transect']}</b><br>Recul: {t['Recul (m)']}m<br>Avancée: {t['Avancée (m)']}m<br>Bilan: {t['Bilan (m)']}m",
         ).add_to(m2)
 
     folium.LayerControl().add_to(m2)
     st_folium(m2, height=500, use_container_width=True, returned_objects=[])
 
-# ═══════════════════════════════════════════════════════
-#  TRANSECTS
-# ═══════════════════════════════════════════════════════
+# ── TRANSECTS ──
 if results["transects"]:
     st.markdown("### 📐 Analyse par transects")
 
     df = pd.DataFrame(results["transects"])
 
-    # ── Graphique ──
     col_g1, col_g2 = st.columns(2)
 
     with col_g1:
         fig1 = go.Figure()
-        fig1.add_trace(
-            go.Bar(
-                x=df["Transect"],
-                y=df["Recul (m)"],
-                name="Recul",
-                marker_color="#ef4444",
-            )
-        )
-        fig1.add_trace(
-            go.Bar(
-                x=df["Transect"],
-                y=df["Avancée (m)"],
-                name="Avancée",
-                marker_color="#22c55e",
-            )
-        )
+        fig1.add_trace(go.Bar(x=df["Transect"], y=df["Recul (m)"], name="Recul", marker_color="#ef4444"))
+        fig1.add_trace(go.Bar(x=df["Transect"], y=df["Avancée (m)"], name="Avancée", marker_color="#22c55e"))
         fig1.update_layout(
-            title="Recul vs Avancée par transect",
-            barmode="group",
-            template="plotly_white",
-            height=380,
-            xaxis_tickangle=-45,
+            title="Recul vs Avancée par transect", barmode="group",
+            template="plotly_white", height=380, xaxis_tickangle=-45,
             legend=dict(orientation="h", y=1.12),
         )
         st.plotly_chart(fig1, use_container_width=True)
 
     with col_g2:
         colors = ["#22c55e" if v >= 0 else "#ef4444" for v in df["Bilan (m)"]]
-        fig2 = go.Figure(
-            go.Bar(
-                x=df["Transect"],
-                y=df["Bilan (m)"],
-                marker_color=colors,
-                text=[f"{v:+d}" for v in df["Bilan (m)"]],
-                textposition="outside",
-            )
-        )
+        fig2 = go.Figure(go.Bar(
+            x=df["Transect"], y=df["Bilan (m)"],
+            marker_color=colors,
+            text=[f"{v:+d}" for v in df["Bilan (m)"]],
+            textposition="outside",
+        ))
         fig2.update_layout(
-            title="Bilan net par transect",
-            template="plotly_white",
-            height=380,
+            title="Bilan net par transect", template="plotly_white", height=380,
             xaxis_tickangle=-45,
-            shapes=[
-                dict(
-                    type="line",
-                    y0=0,
-                    y1=0,
-                    x0=-0.5,
-                    x1=len(df) - 0.5,
-                    line=dict(color="gray", dash="dash"),
-                )
-            ],
+            shapes=[dict(type="line", y0=0, y1=0, x0=-0.5, x1=len(df)-0.5,
+                         line=dict(color="gray", dash="dash"))],
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Tableau ──
+    # Tableau
     def color_bilan(val):
         if isinstance(val, (int, float)):
             if val < 0:
@@ -570,26 +482,16 @@ if results["transects"]:
                 return "color: #22c55e; font-weight: bold"
         return ""
 
-    styled = df.drop(columns=["Lat"]).style.applymap(
-        color_bilan, subset=["Bilan (m)"]
-    )
+    styled = df.drop(columns=["Lat", "Lon"]).style.map(color_bilan, subset=["Bilan (m)"])
     st.dataframe(styled, use_container_width=True, height=380)
 
-    # ── CSV ──
     csv = df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "📥 Télécharger les résultats (CSV)",
-        data=csv,
-        file_name=f"transects_{y1_start}_{y2_end}.csv",
-        mime="text/csv",
-    )
+    st.download_button("📥 Télécharger les résultats (CSV)", data=csv,
+                       file_name=f"transects_{y1_label}_{y2_label}.csv", mime="text/csv")
 
-# ═══════════════════════════════════════════════════════
-#  MÉTHODOLOGIE
-# ═══════════════════════════════════════════════════════
+# ── MÉTHODOLOGIE ──
 with st.expander("📖 Méthodologie"):
-    st.markdown(
-        f"""
+    st.markdown(f"""
 **Données** : Sentinel-2 SR Harmonized (ESA/Copernicus) — B3 (Vert, 10m) + B8 (NIR, 10m)
 
 **Indice** : NDWI = (B3 − B8) / (B3 + B8) — seuil > 0.1 → eau
@@ -597,10 +499,11 @@ with st.expander("📖 Méthodologie"):
 **Nettoyage** : focal_max + focal_min (morphologie) pour supprimer le bruit
 
 **Changements** :
-- Érosion = terre en {y1_start}-{y1_end} devenue eau en {y2_start}-{y2_end}
-- Accrétion = eau en {y1_start}-{y1_end} devenue terre en {y2_start}-{y2_end}
+- Érosion = terre en {y1_label} devenue eau en {y2_label}
+- Accrétion = eau en {y1_label} devenue terre en {y2_label}
 
-**Transects** : 10 zones perpendiculaires au trait de côte (buffer 800m = 1600m de large).
+**Transects** : zones perpendiculaires au trait de côte (buffer 800m = 1600m de large),
+positionnées automatiquement selon la zone sélectionnée.
 Recul (m) = surface érodée dans le transect / 1600 m
 
 **Pourquoi Sentinel-2 et pas Sentinel-1 (radar) ?**
@@ -612,17 +515,12 @@ Le NDWI optique sépare nettement eau, sable et terre.
 - Effets de marée (influence la position du trait de côte)
 - Résolution de 10m (ne détecte pas les changements < 10m)
 - Composition médiane lisse les variations saisonnières
-"""
-    )
+""")
 
-# ═══════════════════════════════════════════════════════
-#  FOOTER
-# ═══════════════════════════════════════════════════════
+# ── FOOTER ──
 st.markdown("---")
 st.markdown(
     "<div style='text-align:center; color:#94a3b8; font-size:13px;'>"
-    "🌊 Érosion Côtière — Nouakchott | Sentinel-2 NDWI | GEE + Streamlit<br>"
+    "🌊 Érosion Côtière — Mauritanie | Sentinel-2 NDWI | GEE + Streamlit<br>"
     "Observation de la Terre — TP 2026"
-    "</div>",
-    unsafe_allow_html=True,
-)
+    "</div>", unsafe_allow_html=True)
